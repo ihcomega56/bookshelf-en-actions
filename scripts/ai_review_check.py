@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Run an AI-based code review check using an Azure AI Foundry agent.
 
-This script sends the PR diff to a pre-deployed Azure AI Foundry agent and
-converts the agent's response into the same findings JSON schema used by
-``scripts/custom_check.py`` so that ``scripts/emit_annotations.py`` can turn
-it into PR annotations without any further changes.
+Unlike scripts/custom_check.py, this script does not compute the diff
+itself. The pre-deployed Foundry agent (e.g. Microsoft's
+"pr-review-merge-assistant") is configured with its own GitHub connection
+(a PAT) and its GitHub tool, so it reads the pull request directly from
+GitHub. This script only needs to tell the agent which PR to look at, wait
+for its run to complete, and convert its response into the same findings
+JSON schema used by ``scripts/custom_check.py`` so that
+``scripts/emit_annotations.py`` can turn it into PR annotations without any
+further changes.
 
-Authentication:
+Authentication (to call the Foundry project/agent API):
     - If ``AZURE_AI_FOUNDRY_API_KEY`` is set, an ``AzureKeyCredential`` is used.
     - Otherwise ``DefaultAzureCredential`` is used, which supports GitHub
       Actions OIDC federation via ``azure/login`` as well as local
@@ -26,66 +31,52 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 RULE = "ai-review"
-MAX_DIFF_CHARS = 60_000
 RUN_POLL_INTERVAL_SECONDS = 2
 RUN_TIMEOUT_SECONDS = 300
 
-SYSTEM_PROMPT = """You are an expert code reviewer for a Java/Spring Boot repository.
-Review the provided unified diff and report only genuine issues in these categories:
-1. Bugs or logic errors
-2. Security concerns
-3. Violations of common coding standards / design principles
+# The agent already has its own review instructions (risk triage, standards
+# check, etc.) configured in Foundry. This message just tells it which PR to
+# look at via its GitHub tool, and additionally asks it to also include a
+# machine-readable findings block so this script can turn results into PR
+# annotations. If the agent ignores this and replies in its own format, the
+# response is still surfaced to reviewers as a single finding (see
+# build_fallback_finding()).
+USER_MESSAGE_TEMPLATE = """Please review this pull request using your GitHub tool: {repo}#{pr_number}
+({pr_url})
 
-Respond with ONLY a JSON object (no markdown fences, no prose) matching this schema:
-{
+After your normal review, ALSO append a fenced ```json code block containing
+ONLY a JSON object with this schema, listing concrete issues you found:
+{{
   "findings": [
-    {
+    {{
       "file": "path/relative/to/repo",
       "line": 1,
       "severity": "error" | "warning",
       "rule": "ai-review",
       "message": "short description of the issue",
       "suggestion": "concrete suggestion to fix it"
-    }
+    }}
   ]
-}
-Use "error" severity only for bugs or security issues that should block merging.
-Use "warning" for style/design-principle concerns.
-If you find no issues, return {"findings": []}.
+}}
+Use "error" only for bugs or security issues that should block merging.
+If you find no issues, use {{"findings": []}}.
 """
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run an AI review check via Azure AI Foundry and output JSON findings.")
-    parser.add_argument("--changed-files-file", required=True, help="Path to file containing changed files, one per line.")
-    parser.add_argument("--base-sha", required=True, help="Base commit SHA for the diff.")
-    parser.add_argument("--head-sha", required=True, help="Head commit SHA for the diff.")
+    parser = argparse.ArgumentParser(
+        description="Ask a Foundry agent (with its own GitHub PAT) to review a PR and output JSON findings."
+    )
+    parser.add_argument("--repo", required=True, help="owner/repo, e.g. ihcomega56/bookshelf-en-actions")
+    parser.add_argument("--pr-number", required=True, help="Pull request number.")
+    parser.add_argument("--pr-url", required=True, help="Pull request URL.")
     parser.add_argument("--output", required=True, help="Path to output JSON report.")
-    parser.add_argument("--base-dir", default=".", help="Repository root.")
     return parser.parse_args()
-
-
-def read_changed_files(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
-def collect_diff(base_dir: Path, base_sha: str, head_sha: str, changed_files: list[str]) -> str:
-    if not changed_files:
-        return ""
-    cmd = ["git", "diff", f"{base_sha}...{head_sha}", "--"] + changed_files
-    result = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, check=False)
-    diff = result.stdout
-    if len(diff) > MAX_DIFF_CHARS:
-        diff = diff[:MAX_DIFF_CHARS] + "\n... [diff truncated for length] ..."
-    return diff
 
 
 def build_empty_report(reason: str, severity: str = "warning") -> dict:
@@ -113,6 +104,11 @@ def build_empty_report(reason: str, severity: str = "warning") -> dict:
 
 def extract_json_object(text: str) -> dict:
     text = text.strip()
+    # Prefer a fenced ```json block if present, since the agent's normal
+    # narrative review may surround it with prose.
+    fence_match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        return json.loads(fence_match.group(1))
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -120,10 +116,10 @@ def extract_json_object(text: str) -> dict:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         return json.loads(match.group(0))
-    raise ValueError("Could not locate a JSON object in the agent response.")
+    raise ValueError("Could not locate a JSON findings block in the agent response.")
 
 
-def call_foundry_agent(diff_text: str, changed_files: list[str]) -> str:
+def call_foundry_agent(repo: str, pr_number: str, pr_url: str) -> str:
     from azure.ai.projects import AIProjectClient
 
     endpoint = os.environ["AZURE_AI_FOUNDRY_PROJECT_ENDPOINT"]
@@ -142,11 +138,7 @@ def call_foundry_agent(diff_text: str, changed_files: list[str]) -> str:
     project_client = AIProjectClient(endpoint=endpoint, credential=credential)
     agents_client = project_client.agents
 
-    user_message = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"Changed files:\n{chr(10).join(changed_files)}\n\n"
-        f"Unified diff:\n```diff\n{diff_text}\n```"
-    )
+    user_message = USER_MESSAGE_TEMPLATE.format(repo=repo, pr_number=pr_number, pr_url=pr_url)
 
     thread = agents_client.threads.create()
     agents_client.messages.create(thread_id=thread.id, role="user", content=user_message)
@@ -197,28 +189,39 @@ def normalize_findings(raw: dict) -> list[dict]:
     return findings
 
 
+def build_fallback_finding(response_text: str) -> list[dict]:
+    """Used when the agent replied but not with a parseable JSON findings block.
+
+    Surfaces the agent's full narrative review as a single informational
+    finding rather than silently discarding it.
+    """
+    snippet = response_text.strip()
+    if len(snippet) > 2000:
+        snippet = snippet[:2000] + " ... [truncated]"
+    return [
+        {
+            "file": "",
+            "line": 1,
+            "severity": "warning",
+            "rule": "ai-review-narrative",
+            "message": "Agent responded without a parseable JSON findings block; see full review below.",
+            "suggestion": snippet,
+        }
+    ]
+
+
 def main() -> int:
     args = parse_args()
-    base_dir = Path(args.base_dir).resolve()
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    changed_files = read_changed_files(Path(args.changed_files_file))
-    if not changed_files:
-        output_path.write_text(json.dumps(build_empty_report(""), indent=2), encoding="utf-8")
-        print("No changed files to review with AI check.")
-        return 0
-
-    diff_text = collect_diff(base_dir, args.base_sha, args.head_sha, changed_files)
-    if not diff_text.strip():
-        output_path.write_text(json.dumps(build_empty_report(""), indent=2), encoding="utf-8")
-        print("Empty diff; skipping AI review call.")
-        return 0
-
     try:
-        response_text = call_foundry_agent(diff_text, changed_files)
-        raw = extract_json_object(response_text)
-        findings = normalize_findings(raw)
+        response_text = call_foundry_agent(args.repo, args.pr_number, args.pr_url)
+        try:
+            raw = extract_json_object(response_text)
+            findings = normalize_findings(raw)
+        except (ValueError, json.JSONDecodeError):
+            findings = build_fallback_finding(response_text)
     except Exception as exc:  # noqa: BLE001 - convert any failure into a warning finding
         report = build_empty_report(f"AI review check failed: {exc}", severity="warning")
         output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -231,7 +234,7 @@ def main() -> int:
 
     report = {
         "mode": "ai-review",
-        "scanned_files": sorted(set(changed_files)),
+        "scanned_files": [],
         "findings": findings,
         "summary": {"total": len(findings), "errors": errors, "warnings": warnings},
     }

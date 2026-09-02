@@ -67,12 +67,10 @@ jobs:
           AZURE_AI_FOUNDRY_AGENT_ID: ${{ vars.AZURE_AI_FOUNDRY_AGENT_ID }}
           AZURE_AI_FOUNDRY_API_KEY: ${{ secrets.AZURE_AI_FOUNDRY_API_KEY }}
         run: |
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           python3 scripts/ai_review_check.py \
-            --changed-files-file changed-files.txt \
-            --base-sha "$BASE_SHA" \
-            --head-sha "$HEAD_SHA" \
+            --repo "${{ github.repository }}" \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --pr-url "${{ github.event.pull_request.html_url }}" \
             --output ai-review-report.json
 
       - name: Publish annotations
