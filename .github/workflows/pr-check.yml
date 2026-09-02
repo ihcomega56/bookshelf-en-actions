@@ -8,6 +8,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  id-token: write
 
 jobs:
   pr-check:
@@ -44,10 +45,41 @@ jobs:
             --changed-files-file changed-files.txt \
             --output custom-check-report.json
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install AI check dependencies
+        run: pip install -r scripts/requirements-ai-check.txt
+
+      - name: Log in to Azure (OIDC)
+        if: ${{ vars.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run AI review check
+        env:
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_AI_FOUNDRY_AGENT_ID: ${{ vars.AZURE_AI_FOUNDRY_AGENT_ID }}
+          AZURE_AI_FOUNDRY_API_KEY: ${{ secrets.AZURE_AI_FOUNDRY_API_KEY }}
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          python3 scripts/ai_review_check.py \
+            --changed-files-file changed-files.txt \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --output ai-review-report.json
+
       - name: Publish annotations
         run: |
           python3 scripts/emit_annotations.py \
             --input custom-check-report.json \
+            --input ai-review-report.json \
             --summary-file "$GITHUB_STEP_SUMMARY" \
             --fail-on-error
 
@@ -57,3 +89,10 @@ jobs:
         with:
           name: pr-custom-check-report
           path: custom-check-report.json
+
+      - name: Upload AI review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-ai-review-report
+          path: ai-review-report.json

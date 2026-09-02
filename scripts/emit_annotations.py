@@ -5,11 +5,40 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Emit GitHub Actions annotations from custom check report.")
-    parser.add_argument("--input", required=True, help="Path to findings JSON")
+    parser = argparse.ArgumentParser(description="Emit GitHub Actions annotations from custom check report(s).")
+    parser.add_argument(
+        "--input",
+        required=True,
+        action="append",
+        help="Path to findings JSON. May be given multiple times to merge several reports.",
+    )
     parser.add_argument("--summary-file", help="Path to $GITHUB_STEP_SUMMARY")
     parser.add_argument("--fail-on-error", action="store_true", help="Exit non-zero when error findings exist")
     return parser.parse_args()
+
+
+def load_reports(paths: list[str]) -> dict:
+    """Merge one or more findings reports into a single report dict."""
+    merged_scanned_files: set[str] = set()
+    merged_findings: list[dict] = []
+    modes: list[str] = []
+
+    for path in paths:
+        report = json.loads(Path(path).read_text(encoding="utf-8"))
+        merged_scanned_files.update(report.get("scanned_files", []))
+        merged_findings.extend(report.get("findings", []))
+        if report.get("mode"):
+            modes.append(report["mode"])
+
+    errors = sum(1 for f in merged_findings if f.get("severity") in {"error", "blocker"})
+    warnings = sum(1 for f in merged_findings if f.get("severity") == "warning")
+
+    return {
+        "mode": "+".join(modes) if modes else None,
+        "scanned_files": sorted(merged_scanned_files),
+        "findings": merged_findings,
+        "summary": {"total": len(merged_findings), "errors": errors, "warnings": warnings},
+    }
 
 
 def escape_annotation(value: str) -> str:
@@ -53,7 +82,7 @@ def write_summary(report: dict, summary_file: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    report = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    report = load_reports(args.input)
     findings = report.get("findings", [])
 
     error_count = 0
@@ -72,7 +101,7 @@ def main() -> int:
             warning_count += 1
             print(f"::warning file={file_name},line={line_number}::{escaped}")
 
-    print(f"Custom check findings: errors={error_count}, warnings={warning_count}")
+    print(f"Check findings: errors={error_count}, warnings={warning_count}")
 
     if args.summary_file:
         write_summary(report, Path(args.summary_file))
