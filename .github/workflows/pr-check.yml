@@ -1,0 +1,59 @@
+name: PR Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  pr-check:
+    if: github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build and run unit tests
+        run: ./gradlew build
+
+      - name: Collect changed files
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > changed-files.txt
+          echo "Changed files:"
+          cat changed-files.txt
+
+      - name: Run custom diff check
+        run: |
+          python3 scripts/custom_check.py \
+            --mode diff \
+            --changed-files-file changed-files.txt \
+            --output custom-check-report.json
+
+      - name: Publish annotations
+        run: |
+          python3 scripts/emit_annotations.py \
+            --input custom-check-report.json \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --fail-on-error
+
+      - name: Upload custom check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-custom-check-report
+          path: custom-check-report.json
