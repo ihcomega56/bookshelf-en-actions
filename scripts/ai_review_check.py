@@ -76,6 +76,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr-number", required=True, help="Pull request number.")
     parser.add_argument("--pr-url", required=True, help="Pull request URL.")
     parser.add_argument("--output", required=True, help="Path to output JSON report.")
+    parser.add_argument(
+        "--raw-output",
+        help="Optional path to also save the agent's raw narrative response (for posting as a PR comment).",
+    )
     return parser.parse_args()
 
 
@@ -214,9 +218,14 @@ def main() -> int:
     args = parse_args()
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_output_path = Path(args.raw_output) if args.raw_output else None
+    if raw_output_path:
+        raw_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         response_text = call_foundry_agent(args.repo, args.pr_number, args.pr_url)
+        if raw_output_path:
+            raw_output_path.write_text(response_text, encoding="utf-8")
         try:
             raw = extract_json_object(response_text)
             findings = normalize_findings(raw)
@@ -225,6 +234,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - convert any failure into a warning finding
         report = build_empty_report(f"AI review check failed: {exc}", severity="warning")
         output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        if raw_output_path:
+            raw_output_path.write_text(f"AI review check failed: {exc}", encoding="utf-8")
         print(f"AI review check failed: {exc}", file=sys.stderr)
         return 0
 
