@@ -32,12 +32,11 @@ import json
 import os
 import re
 import sys
-import time
 from pathlib import Path
 
 RULE = "ai-review"
-RUN_POLL_INTERVAL_SECONDS = 2
 RUN_TIMEOUT_SECONDS = 300
+MAX_APPROVAL_TURNS = 10
 
 # The agent already has its own review instructions (risk triage, standards
 # check, etc.) configured in Foundry. This message just tells it which PR to
@@ -139,38 +138,41 @@ def call_foundry_agent(repo: str, pr_number: str, pr_url: str) -> str:
 
         credential = DefaultAzureCredential()
 
-    project_client = AIProjectClient(endpoint=endpoint, credential=credential)
-    agents_client = project_client.agents
+    # allow_preview=True is required to target a specific agent's endpoint
+    # (agent_name below) rather than a generic project-level deployment.
+    project_client = AIProjectClient(endpoint=endpoint, credential=credential, allow_preview=True)
+    openai_client = project_client.get_openai_client(agent_name=agent_id)
 
     user_message = USER_MESSAGE_TEMPLATE.format(repo=repo, pr_number=pr_number, pr_url=pr_url)
 
-    thread = agents_client.threads.create()
-    agents_client.messages.create(thread_id=thread.id, role="user", content=user_message)
-    run = agents_client.runs.create(thread_id=thread.id, agent_id=agent_id)
+    response = openai_client.responses.create(input=user_message, timeout=RUN_TIMEOUT_SECONDS)
 
-    deadline = time.time() + RUN_TIMEOUT_SECONDS
-    while run.status in {"queued", "in_progress", "requires_action"}:
-        if time.time() > deadline:
-            raise TimeoutError(f"Foundry agent run timed out after {RUN_TIMEOUT_SECONDS}s (status={run.status}).")
-        time.sleep(RUN_POLL_INTERVAL_SECONDS)
-        run = agents_client.runs.get(thread_id=thread.id, run_id=run.id)
+    # The agent's GitHub MCP tool requires explicit approval before each tool
+    # call actually executes (a security feature of the Responses API's MCP
+    # integration). Auto-approve these requests in a loop -- we already trust
+    # this pre-deployed agent and its GitHub connection -- until the agent
+    # produces a final message with no more pending approvals.
+    for _ in range(MAX_APPROVAL_TURNS):
+        approvals = [item for item in response.output if getattr(item, "type", None) == "mcp_approval_request"]
+        if not approvals:
+            break
+        approval_inputs = [
+            {"type": "mcp_approval_response", "approve": True, "approval_request_id": item.id}
+            for item in approvals
+        ]
+        response = openai_client.responses.create(
+            input=approval_inputs,
+            previous_response_id=response.id,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
 
-    if run.status != "completed":
-        raise RuntimeError(f"Foundry agent run did not complete successfully (status={run.status}).")
+    if getattr(response, "status", None) not in (None, "completed"):
+        raise RuntimeError(f"Foundry agent run did not complete successfully (status={response.status}).")
 
-    messages = agents_client.messages.list(thread_id=thread.id)
-    for message in messages:
-        if message.role == "assistant":
-            parts = getattr(message, "content", []) or []
-            texts = []
-            for part in parts:
-                text_value = getattr(getattr(part, "text", None), "value", None)
-                if text_value:
-                    texts.append(text_value)
-            if texts:
-                return "\n".join(texts)
-
-    raise RuntimeError("Foundry agent run completed but returned no assistant message.")
+    output_text = getattr(response, "output_text", None)
+    if not output_text:
+        raise RuntimeError("Foundry agent run completed but returned no output text (possibly stuck on MCP tool approval).")
+    return output_text
 
 
 def normalize_findings(raw: dict) -> list[dict]:

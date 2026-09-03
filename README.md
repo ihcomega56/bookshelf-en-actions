@@ -123,12 +123,18 @@ If the agent replies without a parseable JSON block (e.g. it only returns its ow
 ### Required configuration
 
 Set these as repository/organization **Variables** (`vars.*`) unless noted otherwise:
-- `AZURE_AI_FOUNDRY_PROJECT_ENDPOINT` — Foundry project endpoint URL
-- `AZURE_AI_FOUNDRY_AGENT_ID` — ID of the pre-deployed agent to call
+- `AZURE_AI_FOUNDRY_PROJECT_ENDPOINT` — Foundry **project** endpoint URL, in the form
+  `https://<resource>.services.ai.azure.com/api/projects/<project-name>`
+  (the plain `https://<resource>.cognitiveservices.azure.com/` resource endpoint does *not* work with the agent-invocation API used here).
+- `AZURE_AI_FOUNDRY_AGENT_ID` — ID of the pre-deployed agent to call (the `id` field of the agent's manifest, e.g. `pr-review-merge-assistant-2`; not the Entra Agent Identity / `agent_guid`).
 
 Authentication for calling the Foundry project/agent API (choose one — this is separate from the GitHub PAT configured on the agent's GitHub connection, which lets the agent read PRs):
-- **OIDC (recommended)** — set `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as Variables and configure a federated credential on the Azure AD app for this repository/workflow. The workflow logs in via `azure/login@v2` and the script authenticates with `DefaultAzureCredential`.
-- **API key** — set `AZURE_AI_FOUNDRY_API_KEY` as a repository **Secret**. When present, it takes precedence over OIDC.
+- **OIDC (recommended)** — set `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as Variables and configure a federated credential on the Azure AD app for this repository/workflow. The workflow logs in via `azure/login@v2` and the script authenticates with `DefaultAzureCredential`. Required if the Foundry resource enforces `disableLocalAuth` (common under an Azure Policy that disallows API keys).
+- **API key** — set `AZURE_AI_FOUNDRY_API_KEY` as a repository **Secret**. When present, it takes precedence over OIDC. Not usable if the resource has local (key-based) auth disabled.
+
+### MCP tool approval
+
+The agent's GitHub tool is invoked via MCP (Model Context Protocol). The Responses API requires each MCP tool call to be explicitly approved before it executes (`mcp_approval_request` output items). `call_foundry_agent()` automatically approves these requests in a loop (up to `MAX_APPROVAL_TURNS`) so the agent can read the PR and produce its review without manual intervention.
 
 ## Required Status Check Setup
 
