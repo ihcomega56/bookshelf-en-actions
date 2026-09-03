@@ -71,19 +71,7 @@ public class LoanController {
             }
 
             long days = ChronoUnit.DAYS.between(loan.getDueOn(), now);
-            String level = "LOW";
-            if (days > 0) {
-                if (days >= 7) {
-                    level = "MEDIUM";
-                    if (days >= 30) {
-                        level = "HIGH";
-                    }
-                } else if (days == 1) {
-                    level = "LOW";
-                } else {
-                    level = "LOW";
-                }
-            }
+            String level = priorityForOverdueDays(days);
 
             String message;
             if (level.equals("HIGH")) {
@@ -122,5 +110,15 @@ public class LoanController {
             }
         }
         return result;
+    }
+
+    static String priorityForOverdueDays(long overdueDays) {
+        if (overdueDays >= 30) {
+            return "HIGH";
+        }
+        if (overdueDays >= 7) {
+            return "MEDIUM";
+        }
+        return "LOW";
     }
 }
