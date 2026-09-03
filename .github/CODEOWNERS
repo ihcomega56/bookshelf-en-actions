@@ -1,0 +1,3 @@
+# Default owner for all files. Required so that CODEOWNERS review can be
+# enforced by branch protection / rulesets.
+* @ihcomega56
