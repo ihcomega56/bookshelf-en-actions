@@ -74,27 +74,28 @@ jobs:
             --output ai-review-report.json \
             --raw-output ai-review-raw.md
 
-      - name: Post AI review as PR comment
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          {
-            echo "## 🤖 AI Review (Azure AI Foundry)"
-            echo ""
-            cat ai-review-raw.md
-          } > ai-review-comment.md
-          gh pr comment "${{ github.event.pull_request.number }}" \
-            --repo "${{ github.repository }}" \
-            --body-file ai-review-comment.md
-
       - name: Publish annotations
         run: |
           python3 scripts/emit_annotations.py \
             --input custom-check-report.json \
             --input ai-review-report.json \
             --summary-file "$GITHUB_STEP_SUMMARY" \
+            --pr-comment-file pr-comment.md \
+            --ai-raw-file ai-review-raw.md \
             --fail-on-error
+
+      - name: Post PR comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f pr-comment.md ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" \
+              --body-file pr-comment.md
+          else
+            echo "pr-comment.md not found (an earlier step likely failed); skipping PR comment."
+          fi
 
       - name: Upload custom check report
         if: always()
@@ -111,3 +112,4 @@ jobs:
           path: |
             ai-review-report.json
             ai-review-raw.md
+            pr-comment.md

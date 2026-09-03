@@ -109,6 +109,12 @@ Current rule coverage includes:
 
 `scripts/emit_annotations.py` reads this JSON and emits GitHub Actions annotations. It accepts one or more `--input` reports (merging them) so both the deterministic and AI-based checks can be combined into a single set of annotations.
 
+It also (optionally) renders human-friendly, severity-annotated output:
+- `--summary-file "$GITHUB_STEP_SUMMARY"` — writes a findings table to the workflow run's Step Summary page.
+- `--pr-comment-file pr-comment.md` — writes a PR-comment-ready markdown file: a 🔴/🟡 severity count header, a pass/fail status line, and a collapsible findings table (each row also tagged with its source, `🔍 Custom check` or `🤖 AI review`). Pass `--ai-raw-file <path>` to additionally embed the AI agent's full narrative response in its own collapsible section at the bottom.
+
+GitHub Markdown has no native cell coloring, so 🔴 (error/blocker) and 🟡 (warning) emoji are used consistently across the Step Summary and PR comment as a readable stand-in for color-coding.
+
 ## AI Review Check (Azure AI Foundry)
 
 `scripts/ai_review_check.py` asks a pre-deployed Azure AI Foundry agent (e.g. Microsoft's `pr-review-merge-assistant`) to review the PR for:
