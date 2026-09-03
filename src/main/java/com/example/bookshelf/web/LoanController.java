@@ -59,16 +59,15 @@ public class LoanController {
         List<Map<String, Object>> result = new ArrayList<>();
         List<Loan> loans = bookshelfService.findOverdueLoans();
         List<Book> books = bookshelfService.findAllBooks();
+        Map<Long, String> titlesByBookId = new HashMap<>();
+        for (Book book : books) {
+            titlesByBookId.putIfAbsent(book.getId(), book.getTitle());
+        }
         LocalDate now = LocalDate.now();
 
         for (int i = 0; i < loans.size(); i++) {
             Loan loan = loans.get(i);
-            String title = "Unknown book";
-            for (int j = 0; j < books.size(); j++) {
-                if (books.get(j).getId().equals(loan.getBookId())) {
-                    title = books.get(j).getTitle();
-                }
-            }
+            String title = titlesByBookId.getOrDefault(loan.getBookId(), "Unknown book");
 
             long days = ChronoUnit.DAYS.between(loan.getDueOn(), now);
             String level = "LOW";
